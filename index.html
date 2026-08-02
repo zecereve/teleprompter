@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Teleprompter</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: #000;
+    color: #fff;
+    font-family: -apple-system, Roboto, "Segoe UI", Arial, sans-serif;
+    overflow: hidden;
+  }
+
+  #editArea {
+    position: fixed; inset: 0 0 130px 0;
+    display: flex;
+  }
+  #editArea textarea {
+    flex: 1;
+    background: #000;
+    color: #fff;
+    border: none;
+    outline: none;
+    resize: none;
+    font-size: 20px;
+    line-height: 1.5;
+    padding: 24px;
+  }
+
+  #promptWrap {
+    position: fixed;
+    inset: 0 0 130px 0;
+    overflow-y: auto;
+    display: none;
+    -webkit-overflow-scrolling: touch;
+  }
+  #promptText {
+    padding: 24px;
+    padding-top: 60vh;
+    padding-bottom: 60vh;
+    font-size: 32px;
+    line-height: 1.6;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+  }
+
+  #controls {
+    position: fixed;
+    left: 0; right: 0; bottom: 0;
+    background: #151515;
+    border-top: 1px solid #2a2a2a;
+    padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .row:last-child { margin-bottom: 0; }
+  .label {
+    flex: 1;
+    font-size: 15px;
+    color: #ccc;
+  }
+  .val {
+    width: 36px;
+    text-align: center;
+    font-size: 16px;
+    color: #fff;
+  }
+  button {
+    background: #2a2a2a;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 18px;
+    padding: 10px 16px;
+    min-width: 44px;
+    cursor: pointer;
+  }
+  button:active { background: #3a3a3a; }
+  .primary {
+    flex: 1.6;
+    background: #d64545;
+    font-weight: 600;
+    font-size: 16px;
+  }
+  .primary:active { background: #b73838; }
+  .secondary {
+    flex: 1.6;
+    background: #333;
+    font-size: 15px;
+  }
+
+  #fsBtn {
+    position: fixed;
+    top: 10px; right: 10px;
+    z-index: 20;
+    opacity: 0.6;
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+</style>
+</head>
+<body>
+
+  <div id="editArea">
+    <textarea id="etInput" placeholder="Metninizi buraya yapıştırın..."></textarea>
+  </div>
+
+  <div id="promptWrap">
+    <div id="promptText"></div>
+  </div>
+
+  <button id="fsBtn">⛶ Tam Ekran</button>
+
+  <div id="controls">
+    <div class="row">
+      <div class="label">Hız</div>
+      <button id="speedDown">−</button>
+      <div class="val" id="speedVal">3</div>
+      <button id="speedUp">+</button>
+      <div style="width:8px"></div>
+      <button class="primary" id="startBtn">Başlat</button>
+    </div>
+    <div class="row">
+      <div class="label">Yazı</div>
+      <button id="fontDown">−</button>
+      <div class="val" id="fontVal">32</div>
+      <button id="fontUp">+</button>
+      <div style="width:8px"></div>
+      <button class="secondary" id="editBtn">Metni Düzenle</button>
+    </div>
+  </div>
+
+<script>
+(function() {
+  const etInput = document.getElementById('etInput');
+  const editArea = document.getElementById('editArea');
+  const promptWrap = document.getElementById('promptWrap');
+  const promptText = document.getElementById('promptText');
+  const startBtn = document.getElementById('startBtn');
+  const editBtn = document.getElementById('editBtn');
+  const speedUp = document.getElementById('speedUp');
+  const speedDown = document.getElementById('speedDown');
+  const fontUp = document.getElementById('fontUp');
+  const fontDown = document.getElementById('fontDown');
+  const speedVal = document.getElementById('speedVal');
+  const fontVal = document.getElementById('fontVal');
+  const fsBtn = document.getElementById('fsBtn');
+
+  let speed = 3;
+  let fontSize = 32;
+  let scrolling = false;
+  let scrollTimer = null;
+  let wakeLock = null;
+
+  // --- Ayarları / son metni geri yükle ---
+  function safeGet(key, fallback) {
+    try { return localStorage.getItem(key) ?? fallback; }
+    catch (e) { return fallback; }
+  }
+  function safeSet(key, val) {
+    try { localStorage.setItem(key, val); } catch (e) {}
+  }
+
+  etInput.value = safeGet('tp_text', '');
+  speed = parseInt(safeGet('tp_speed', '3'), 10);
+  fontSize = parseInt(safeGet('tp_font', '32'), 10);
+  speedVal.textContent = speed;
+  fontVal.textContent = fontSize;
+  promptText.style.fontSize = fontSize + 'px';
+  promptText.textContent = etInput.value;
+
+  // --- Metin düzenleme <-> kayan görünüm geçişi ---
+  function showPrompt() {
+    promptText.textContent = etInput.value;
+    safeSet('tp_text', etInput.value);
+    editArea.style.display = 'none';
+    promptWrap.style.display = 'block';
+    editBtn.textContent = 'Metni Düzenle';
+  }
+  function showEdit() {
+    stopScrolling();
+    editArea.style.display = 'flex';
+    promptWrap.style.display = 'none';
+    editBtn.textContent = 'Yapıştır / Bitti';
+  }
+
+  editBtn.addEventListener('click', () => {
+    if (editArea.style.display !== 'none') {
+      showPrompt();
+    } else {
+      showEdit();
+    }
+  });
+
+  // --- Başlat / Durdur ---
+  function startScrolling() {
+    if (editArea.style.display !== 'none') showPrompt();
+    scrolling = true;
+    startBtn.textContent = 'Durdur';
+    requestWakeLock();
+    scrollTimer = setInterval(() => {
+      promptWrap.scrollTop += speed;
+    }, 50);
+  }
+  function stopScrolling() {
+    scrolling = false;
+    startBtn.textContent = 'Başlat';
+    if (scrollTimer) { clearInterval(scrollTimer); scrollTimer = null; }
+    releaseWakeLock();
+  }
+  startBtn.addEventListener('click', () => {
+    scrolling ? stopScrolling() : startScrolling();
+  });
+
+  // --- Hız ---
+  speedUp.addEventListener('click', () => {
+    if (speed < 15) speed++;
+    speedVal.textContent = speed;
+    safeSet('tp_speed', speed);
+  });
+  speedDown.addEventListener('click', () => {
+    if (speed > 1) speed--;
+    speedVal.textContent = speed;
+    safeSet('tp_speed', speed);
+  });
+
+  // --- Yazı boyutu ---
+  fontUp.addEventListener('click', () => {
+    if (fontSize < 96) fontSize += 2;
+    fontVal.textContent = fontSize;
+    promptText.style.fontSize = fontSize + 'px';
+    safeSet('tp_font', fontSize);
+  });
+  fontDown.addEventListener('click', () => {
+    if (fontSize > 12) fontSize -= 2;
+    fontVal.textContent = fontSize;
+    promptText.style.fontSize = fontSize + 'px';
+    safeSet('tp_font', fontSize);
+  });
+
+  // --- Metin her değiştikçe kaydet ---
+  etInput.addEventListener('input', () => {
+    safeSet('tp_text', etInput.value);
+  });
+
+  // --- Tam ekran ---
+  fsBtn.addEventListener('click', () => {
+    const el = document.documentElement;
+    if (!document.fullscreenElement) {
+      (el.requestFullscreen || el.webkitRequestFullscreen || function(){}).call(el);
+      fsBtn.textContent = '⛶ Çık';
+    } else {
+      (document.exitFullscreen || document.webkitExitFullscreen || function(){}).call(document);
+      fsBtn.textContent = '⛶ Tam Ekran';
+    }
+  });
+
+  // --- Ekranın uyumaması (Wake Lock API, destekleyen tarayıcılarda) ---
+  async function requestWakeLock() {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch (e) { /* desteklenmiyorsa sessizce geç */ }
+  }
+  function releaseWakeLock() {
+    if (wakeLock) { wakeLock.release(); wakeLock = null; }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (scrolling && document.visibilityState === 'visible') requestWakeLock();
+  });
+})();
+</script>
+</body>
+</html>
